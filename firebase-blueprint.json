@@ -36,6 +36,18 @@
         "result": { "type": "object" }
       },
       "required": ["userId", "timestamp", "result"]
+    },
+    "ConsultationMessage": {
+      "title": "AI Consultation Message",
+      "description": "A single message in an AI consultation chat session.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "role": { "type": "string", "enum": ["user", "model", "system", "assistant"] },
+        "content": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "role", "content", "timestamp"]
     }
   },
   "firestore": {
@@ -50,6 +62,10 @@
     "/users/{userId}/ingredient_history/{scanId}": {
       "schema": "IngredientScan",
       "description": "History of cosmetic ingredient analyses for a specific user."
+    },
+    "/users/{userId}/consultations/{messageId}": {
+      "schema": "ConsultationMessage",
+      "description": "History of AI consultation chat messages."
     }
   }
 }

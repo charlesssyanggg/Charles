@@ -1,43 +1,21 @@
 // ===============================================================
-// Assumed Data Model
-// ===============================================================
-//
-// Collection: /users/{userId}
-// Document ID: userId (UID)
-// Fields:
-//   - userId: string (required)
-//   - email: string (required)
-//   - displayName: string (optional)
-//   - photoURL: string (optional)
-//   - createdAt: string (format: date-time)
-//
-// Collection: /users/{userId}/skin_history/{scanId}
-// Document ID: auto-generated
-// Fields:
-//   - userId: string (required)
-//   - timestamp: string (required, format: date-time)
-//   - image: string (required, base64)
-//   - result: map (required, SkinAnalysisResult)
-//
-// Collection: /users/{userId}/ingredient_history/{scanId}
-// Document ID: auto-generated
-// Fields:
-//   - userId: string (required)
-//   - timestamp: string (required, format: date-time)
-//   - ingredients: string (optional)
-//   - result: map (required)
-//
+// ABAC & Zero-Trust Architecture Rules
 // ===============================================================
 
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // ===============================================================
-    // Helper Functions
-    // ===============================================================
+    // 0. Global Safety Net (Catch-all deny)
+    match /{document=**} { 
+      allow read, write: if false; 
+    }
 
+    // ===============================================================
+    // Primitives & Authentication
+    // ===============================================================
     function isAuthenticated() {
+      // Identity verification
       return request.auth != null;
     }
 
@@ -46,50 +24,116 @@ service cloud.firestore {
     }
 
     function isAdmin() {
-      return isAuthenticated() &&
-        (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin' ||
-          (request.auth.token.email == "charlesssyanggg@gmail.com" && request.auth.token.email_verified == true));
+      // Hardcoded super-admin fallback or valid document fallback
+      return isAuthenticated() && 
+             (exists(/databases/$(database)/documents/admins/$(request.auth.uid)) || 
+              (request.auth.token.email == "charlesssyanggg@gmail.com" && request.auth.token.email_verified == true));
     }
 
-    function isValidUser(data) {
-      return data.keys().hasAll(['userId', 'email']) &&
-             data.userId is string &&
-             data.email is string &&
-             data.email.matches("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$");
-    }
+    function incoming() { return request.resource.data; }
+    function existing() { return resource.data; }
 
-    function isValidScan(data) {
-      return data.keys().hasAll(['userId', 'timestamp', 'result']) &&
-             data.userId == request.auth.uid &&
-             data.timestamp is string;
+    function isValidId(id) {
+      // Path Variable Hardening against "Denial of Wallet" injections
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
     }
 
     // ===============================================================
-    // Rules
+    // Validation Blueprints (Anti-Update-Gap)
+    // ===============================================================
+    
+    function isValidUser(data) {
+      return data.keys().hasAll(['userId', 'email']) &&
+             data.keys().size() >= 2 && data.keys().size() <= 5 &&
+             data.userId is string && data.userId.size() <= 128 && data.userId == request.auth.uid &&
+             data.email is string && data.email.size() <= 256 && data.email.matches("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$") &&
+             data.get('displayName', 'anonymous') is string && data.get('displayName', 'anonymous').size() <= 100 &&
+             data.get('photoURL', 'empty') is string && data.get('photoURL', 'empty').size() <= 2048 &&
+             data.get('createdAt', '1970-01-01T00:00:00Z') is string && data.get('createdAt', '1970-01-01T00:00:00Z').size() <= 30;
+    }
+
+    function isValidSkinScan(data) {
+      return data.keys().hasAll(['userId', 'timestamp', 'result']) &&
+             (data.keys().size() == 3 || data.keys().size() == 4) &&
+             data.userId is string && data.userId == request.auth.uid &&
+             data.timestamp is string && data.timestamp.size() <= 30 &&
+             (data.get('image', 'no-img') is string && data.get('image', 'no-img').size() <= 1048576) && // Limit Base64 to roughly 1MB
+             data.result is map;
+    }
+
+    function isValidIngredientScan(data) {
+      return data.keys().hasAll(['userId', 'timestamp', 'result']) &&
+             (data.keys().size() == 3 || data.keys().size() == 4) &&
+             data.userId is string && data.userId == request.auth.uid &&
+             data.timestamp is string && data.timestamp.size() <= 30 &&
+             (data.get('ingredients', '') is string && data.get('ingredients', '').size() <= 10000) &&
+             data.result is map;
+    }
+
+    function isValidConsultation(data) {
+      // Strictly enforces AI conversation message schema
+      return data.keys().hasAll(['userId', 'role', 'content', 'timestamp']) &&
+             data.keys().size() == 4 &&
+             data.userId is string && data.userId == request.auth.uid &&
+             data.role is string && data.role.size() <= 20 && data.role.matches('^(user|model|system|assistant)$') &&
+             // Limit message length to avoid cost injection
+             data.content is string && data.content.size() <= 20000 && 
+             data.timestamp is string && data.timestamp.size() <= 30;
+    }
+
+    // ===============================================================
+    // Collection Matchers
     // ===============================================================
 
     match /users/{userId} {
-      allow read: if isOwner(userId) || isAdmin();
-      allow create: if isOwner(userId) && isValidUser(request.resource.data);
-      allow update: if isOwner(userId) && isValidUser(request.resource.data) && 
-                      request.resource.data.userId == resource.data.userId; // userId is immutable
+      allow read: if isValidId(userId) && (isOwner(userId) || isAdmin());
+      
+      // Enforce strict schema on creation
+      allow create: if isValidId(userId) && isOwner(userId) && isValidUser(incoming());
+      
+      // Action-based Update with Immutability constraints
+      allow update: if isValidId(userId) && isOwner(userId) && isValidUser(incoming()) && 
+                      // Immutable constraints: cannot change core identity
+                      incoming().userId == existing().userId &&
+                      incoming().email == existing().email &&
+                      incoming().createdAt == existing().createdAt;
+      
+      // --- SUB-COLLECTIONS ---
+      // Relational Sync enforced by nested match structure ensures 
+      // these documents are tied to the parent user path
       
       match /skin_history/{scanId} {
-        allow read: if isOwner(userId) || isAdmin();
-        allow create: if isOwner(userId) && isValidScan(request.resource.data);
-        allow update, delete: if isOwner(userId) || isAdmin();
+        allow read: if isValidId(userId) && isValidId(scanId) && (isOwner(userId) || isAdmin());
+        allow create: if isValidId(userId) && isValidId(scanId) && isOwner(userId) && isValidSkinScan(incoming());
+        allow update: if isValidId(userId) && isValidId(scanId) && isOwner(userId) && isValidSkinScan(incoming()) &&
+                         incoming().userId == existing().userId; // Immutable owner
+        allow delete: if isValidId(userId) && isValidId(scanId) && (isOwner(userId) || isAdmin());
+        allow list: if isValidId(userId) && (isOwner(userId) || isAdmin());
       }
 
       match /ingredient_history/{scanId} {
-        allow read: if isOwner(userId) || isAdmin();
-        allow create: if isOwner(userId) && isValidScan(request.resource.data);
-        allow update, delete: if isOwner(userId) || isAdmin();
+        allow read: if isValidId(userId) && isValidId(scanId) && (isOwner(userId) || isAdmin());
+        allow create: if isValidId(userId) && isValidId(scanId) && isOwner(userId) && isValidIngredientScan(incoming());
+        allow update: if isValidId(userId) && isValidId(scanId) && isOwner(userId) && isValidIngredientScan(incoming()) &&
+                         incoming().userId == existing().userId; // Immutable owner
+        allow delete: if isValidId(userId) && isValidId(scanId) && (isOwner(userId) || isAdmin());
+        allow list: if isValidId(userId) && (isOwner(userId) || isAdmin());
       }
-    }
 
-    // Default deny
-    match /{document=**} {
-      allow read, write: if false;
+      // **NEW**: Optimized AI Consultation Chat Database
+      match /consultations/{messageId} {
+        allow read: if isValidId(userId) && isValidId(messageId) && (isOwner(userId) || isAdmin());
+        
+        // Strict creation rule
+        allow create: if isValidId(userId) && isValidId(messageId) && isOwner(userId) && isValidConsultation(incoming());
+        
+        // Chat messages are completely IMMUTABLE once created (Enterprise Standard)
+        allow update: if false; 
+        
+        allow delete: if isValidId(userId) && isValidId(messageId) && (isOwner(userId) || isAdmin());
+        allow list: if isValidId(userId) && (isOwner(userId) || isAdmin());
+      }
     }
   }
 }
+
