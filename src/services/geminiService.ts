@@ -5,7 +5,19 @@
 
 import { GoogleGenAI, Type, ThinkingLevel } from "@google/genai";
 
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+// Lazy initialization so the app doesn't crash immediately on load if the API key is missing.
+let aiClient: GoogleGenAI | null = null;
+
+function getAiClient(): GoogleGenAI {
+  if (!aiClient) {
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey || apiKey === "undefined") {
+      console.warn("⚠️ GEMINI_API_KEY is not set. AI features will fail.");
+    }
+    aiClient = new GoogleGenAI({ apiKey: apiKey || "missing_key" });
+  }
+  return aiClient;
+}
 
 export interface SkinAnalysisResult {
   skinType: string;
@@ -47,6 +59,7 @@ export interface SkinAnalysisResult {
 }
 
 export async function analyzeSkin(imageData: string, previousResult?: SkinAnalysisResult): Promise<SkinAnalysisResult> {
+  const ai = getAiClient();
   let contextPrompt = "";
   if (previousResult) {
     contextPrompt = `\n[历史记录]：${JSON.stringify({
@@ -171,6 +184,7 @@ ${contextPrompt}
 }
 
 export async function consultAI(message: string, history: { role: string; content: string }[]) {
+  const ai = getAiClient();
   const chat = ai.chats.create({
     model: "gemini-3-flash-preview",
     config: {
@@ -206,6 +220,7 @@ export async function analyzeIngredients(ingredients: string, imageData?: string
     });
   }
 
+  const ai = getAiClient();
   const response = await ai.models.generateContent({
     model: "gemini-3-flash-preview",
     contents,
